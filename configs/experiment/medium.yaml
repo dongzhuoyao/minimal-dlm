@@ -1,0 +1,15 @@
+# @package _global_
+# Medium model for better results
+
+model:
+  n_layer: 6
+  n_head: 6
+  n_embd: 384
+
+training:
+  max_iters: 10000
+  batch_size: 48
+  learning_rate: 6e-4
+
+logging:
+  tags: [medium]
