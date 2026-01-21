@@ -43,7 +43,7 @@ diffusion:
 # Training
 training:
   batch_size: 256
-  max_iters: 10000
+  max_iters: 100000
   learning_rate: 1e-3
   weight_decay: 0.1
   warmup_iters: 500
