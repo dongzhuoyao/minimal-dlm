@@ -136,9 +136,11 @@ python train.py model.n_layer=6 model.n_head=6 model.n_embd=384 \
 
 ## Weights & Biases Integration
 
-Organized wandb logging with:
-- **train/**: loss, loss_avg, lr, grad_norm, time_ms
-- **eval/**: train_loss, val_loss, train_ppl, val_ppl
+Organized wandb logging with metric groups:
+- **loss/**: train, train_avg
+- **perf/**: iter_per_sec, tokens_per_sec, time_ms
+- **optim/**: lr, grad_norm
+- **eval/**: train_loss, val_loss, train_ppl, val_ppl, train_bpc, val_bpc
 - **samples**: Generated text samples (logged periodically)
 - **Config**: Full Hydra config logged automatically
 - **Model**: Parameter count, architecture details

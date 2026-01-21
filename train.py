@@ -89,10 +89,12 @@ def init_wandb(cfg: DictConfig, model, output_dir: Path):
         "model/num_params_M": sum(p.numel() for p in model.parameters()) / 1e6,
     })
 
-    # Define custom metrics
-    wandb.define_metric("train/step")
-    wandb.define_metric("train/*", step_metric="train/step")
-    wandb.define_metric("eval/*", step_metric="train/step")
+    # Define custom metrics with step as x-axis
+    wandb.define_metric("step")
+    wandb.define_metric("loss/*", step_metric="step")
+    wandb.define_metric("perf/*", step_metric="step")
+    wandb.define_metric("optim/*", step_metric="step")
+    wandb.define_metric("eval/*", step_metric="step")
 
     return wandb
 
@@ -191,11 +193,13 @@ def main(cfg: DictConfig):
             # Log to wandb
             if wandb:
                 log_dict = {
-                    "train/step": iter_num,
+                    "step": iter_num,
                     "eval/train_loss": losses["train"],
                     "eval/val_loss": losses["val"],
                     "eval/train_ppl": math.exp(losses["train"]),
                     "eval/val_ppl": math.exp(losses["val"]),
+                    "eval/train_bpc": losses["train"] / math.log(2),
+                    "eval/val_bpc": losses["val"] / math.log(2),
                 }
 
                 # Generate and log samples
@@ -251,16 +255,25 @@ def main(cfg: DictConfig):
             avg_loss = running_loss / cfg.training.log_interval if iter_num > 0 else loss.item()
             running_loss = 0.0
 
-            print(f"iter {iter_num}: loss {loss.item():.4f}, time {dt*1000:.0f}ms, lr {lr:.2e}")
+            # Calculate throughput
+            iter_per_sec = cfg.training.log_interval / dt if dt > 0 else 0
+            tokens_per_sec = iter_per_sec * cfg.training.batch_size * cfg.model.block_size
+
+            print(f"iter {iter_num}: loss {loss.item():.4f}, {iter_per_sec:.1f} it/s, lr {lr:.2e}")
 
             if wandb:
                 wandb.log({
-                    "train/step": iter_num,
-                    "train/loss": loss.item(),
-                    "train/loss_avg": avg_loss,
-                    "train/lr": lr,
-                    "train/grad_norm": grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
-                    "train/time_ms": dt * 1000,
+                    "step": iter_num,
+                    # Loss metrics
+                    "loss/train": loss.item(),
+                    "loss/train_avg": avg_loss,
+                    # Performance metrics
+                    "perf/iter_per_sec": iter_per_sec,
+                    "perf/tokens_per_sec": tokens_per_sec,
+                    "perf/time_ms": dt * 1000,
+                    # Optimizer metrics
+                    "optim/lr": lr,
+                    "optim/grad_norm": grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                 })
 
         iter_num += 1
