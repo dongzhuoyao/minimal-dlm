@@ -45,7 +45,7 @@ data:
   dir: data/shakespeare_char
   dataset: shakespeare_char
 
-# Wandb
+# Wandb (enabled by default)
 wandb:
   enabled: true
   project: minimal-dlm
