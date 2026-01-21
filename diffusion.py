@@ -112,6 +112,11 @@ class MaskedDiffusion:
 
         timesteps = torch.linspace(1.0, self.eps, steps + 1, device=device)
 
+        # Compute transfer schedule for confidence strategy (same as dKV-cache)
+        if strategy == "confidence":
+            init_mask_index = (x == self.mask_token_id)
+            num_transfer_tokens = self._get_num_transfer_tokens(init_mask_index, steps)
+
         for i in range(steps):
             t, s = timesteps[i].item(), timesteps[i + 1].item()
             mask_indices = (x == self.mask_token_id)
@@ -121,22 +126,40 @@ class MaskedDiffusion:
                 break
 
             logits, _ = model(x)
-            masked_logits = logits[mask_indices] / temperature
-            probs = F.softmax(masked_logits, dim=-1)
-            sampled = torch.multinomial(probs, 1).squeeze(-1)
 
             if strategy == "confidence":
-                # Unmask highest confidence predictions
-                p_transfer = 1 - s / t if t > 0 else 1.0
-                num_to_unmask = max(1, int(mask_indices.sum().item() * p_transfer))
-                confidence = torch.gather(probs, 1, sampled.unsqueeze(-1)).squeeze(-1)
-                _, top_idx = torch.topk(confidence, min(num_to_unmask, len(confidence)))
-                mask_pos = mask_indices.nonzero(as_tuple=False)
-                for idx in top_idx:
-                    b, pos = mask_pos[idx]
-                    x[b, pos] = sampled[idx]
+                # Use same Gumbel-max sampling as dKV-cache for fair comparison
+                logits_with_noise = self._add_gumbel_noise(logits, temperature)
+                x0 = torch.argmax(logits_with_noise, dim=-1)
+
+                # Compute confidence
+                p = F.softmax(logits.to(torch.float64), dim=-1)
+                x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
+
+                # Only consider masked positions
+                x0 = torch.where(mask_indices, x0, x)
+                confidence = torch.where(mask_indices, x0_p, torch.tensor(-np.inf, device=device))
+
+                # Protect prompt positions
+                if prompt_len > 0:
+                    confidence[:, :prompt_len] = -np.inf
+
+                # Select top-k confident positions to unmask
+                transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=device)
+                for j in range(batch_size):
+                    k = num_transfer_tokens[j, i].item()
+                    if k > 0:
+                        _, select_idx = torch.topk(confidence[j], k=k)
+                        transfer_index[j, select_idx] = True
+
+                # Update x with newly decoded tokens
+                x[transfer_index] = x0[transfer_index]
             else:
-                # Stochastic unmasking
+                # Stochastic unmasking (original behavior)
+                masked_logits = logits[mask_indices] / temperature
+                probs = F.softmax(masked_logits, dim=-1)
+                sampled = torch.multinomial(probs, 1).squeeze(-1)
+
                 p_transfer = 1 - s / t if t > 0 else 1.0
                 unmask = torch.rand(sampled.shape, device=device) < p_transfer
                 mask_pos = mask_indices.nonzero(as_tuple=False)
@@ -219,12 +242,9 @@ class MaskedDiffusion:
             logits_with_noise = self._add_gumbel_noise(logits, temperature)
             x0 = torch.argmax(logits_with_noise, dim=-1)
 
-            # Compute confidence for remasking
-            if strategy == "confidence" or True:  # dKV-Cache uses confidence by default
-                p = F.softmax(logits.to(torch.float64), dim=-1)
-                x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
-            else:
-                x0_p = torch.rand((B, seq_len), device=device)
+            # Compute confidence for remasking (dKV-Cache always uses confidence-based)
+            p = F.softmax(logits.to(torch.float64), dim=-1)
+            x0_p = torch.gather(p, dim=-1, index=x0.unsqueeze(-1)).squeeze(-1)
 
             # Only consider masked positions
             x0 = torch.where(mask_index, x0, x)

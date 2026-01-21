@@ -42,6 +42,7 @@ def measure_sampling_time(
     cache_reloading_step: int = 1,
     num_runs: int = 5,
     warmup_runs: int = 2,
+    strategy: str = "confidence",
 ) -> Dict[str, float]:
     """
     Measure sampling time with multiple runs.
@@ -54,6 +55,7 @@ def measure_sampling_time(
     for _ in range(warmup_runs):
         _ = diffusion.sample(
             model, batch_size, seq_len, steps=steps, device=device,
+            strategy=strategy,
             use_dkv_cache=use_dkv, cache_reloading_step=cache_reloading_step
         )
         if device == "cuda":
@@ -67,6 +69,7 @@ def measure_sampling_time(
         start = time.perf_counter()
         _ = diffusion.sample(
             model, batch_size, seq_len, steps=steps, device=device,
+            strategy=strategy,
             use_dkv_cache=use_dkv, cache_reloading_step=cache_reloading_step
         )
 
@@ -138,15 +141,18 @@ def run_benchmark(
         "dkv_cache": {},
     }
 
+    # Note: dKV-Cache uses confidence-based unmasking, so baseline must too for fair comparison
+    strategy = "confidence"
+
     # Baseline (no cache)
     print("\n" + "=" * 60)
-    print("Baseline (no dKV-Cache)")
+    print("Baseline (no dKV-Cache, confidence strategy)")
     print("=" * 60)
 
     torch.manual_seed(seed)
     baseline_times = measure_sampling_time(
         model, diffusion, batch_size, seq_len, steps, device,
-        use_dkv=False, num_runs=num_runs
+        use_dkv=False, num_runs=num_runs, strategy=strategy
     )
 
     results["baseline"]["timing"] = baseline_times
@@ -160,7 +166,7 @@ def run_benchmark(
         for _ in range(3):
             out = diffusion.sample(
                 model, batch_size, seq_len, steps=steps, device=device,
-                use_dkv_cache=False
+                strategy=strategy, use_dkv_cache=False
             )
             baseline_outputs.append(out.clone())
 
@@ -173,7 +179,8 @@ def run_benchmark(
         torch.manual_seed(seed)
         cache_times = measure_sampling_time(
             model, diffusion, batch_size, seq_len, steps, device,
-            use_dkv=True, cache_reloading_step=reload_step, num_runs=num_runs
+            use_dkv=True, cache_reloading_step=reload_step, num_runs=num_runs,
+            strategy=strategy
         )
 
         speedup = baseline_times["mean"] / cache_times["mean"]
@@ -194,6 +201,7 @@ def run_benchmark(
             for _ in range(3):
                 out = diffusion.sample(
                     model, batch_size, seq_len, steps=steps, device=device,
+                    strategy=strategy,
                     use_dkv_cache=True, cache_reloading_step=reload_step
                 )
                 cache_outputs.append(out.clone())
@@ -428,7 +436,8 @@ def main(cfg: DictConfig):
         torch.manual_seed(cfg.system.seed)
 
         print("\nBaseline (no cache):")
-        out = diffusion.sample(model, 1, min(seq_len, 100), steps=steps, device=device, use_dkv_cache=False)
+        out = diffusion.sample(model, 1, min(seq_len, 100), steps=steps, device=device,
+                              strategy="confidence", use_dkv_cache=False)
         ids = [t for t in out[0].tolist() if t < model_cfg.vocab_size]
         print(f"  {dataset.decode(ids)[:200]}...")
 
@@ -436,6 +445,7 @@ def main(cfg: DictConfig):
         print(f"\ndKV-Cache (reload={best_reload}):")
         torch.manual_seed(cfg.system.seed)
         out = diffusion.sample(model, 1, min(seq_len, 100), steps=steps, device=device,
+                              strategy="confidence",
                               use_dkv_cache=True, cache_reloading_step=best_reload)
         ids = [t for t in out[0].tolist() if t < model_cfg.vocab_size]
         print(f"  {dataset.decode(ids)[:200]}...")
