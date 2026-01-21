@@ -65,6 +65,10 @@ def main(cfg: DictConfig):
     temperature = cfg.sampling.temperature
     strategy = cfg.sampling.strategy
 
+    # dKV-Cache settings
+    use_dkv = cfg.diffusion.get("use_dkv", False)
+    cache_reloading_step = cfg.diffusion.get("cache_reloading_step", 1)
+
     # Prepare prompt
     prompt_tensor, prompt_len = None, 0
     if prompt and dataset:
@@ -75,7 +79,10 @@ def main(cfg: DictConfig):
 
     seq_len = min(prompt_len + max_tokens, model_cfg.block_size)
     print(f"Generating {num_samples} sample(s), {seq_len} tokens, {steps} steps")
-    print(f"Temperature: {temperature}, Strategy: {strategy}\n")
+    print(f"Temperature: {temperature}, Strategy: {strategy}")
+    if use_dkv:
+        print(f"dKV-Cache: enabled (reload every {cache_reloading_step} steps)")
+    print()
 
     for i in range(num_samples):
         if num_samples > 1:
@@ -84,7 +91,8 @@ def main(cfg: DictConfig):
         output = diffusion.sample(
             model, batch_size=1, seq_len=seq_len, steps=steps,
             temperature=temperature, device=device,
-            prompt=prompt_tensor, strategy=strategy
+            prompt=prompt_tensor, strategy=strategy,
+            use_dkv_cache=use_dkv, cache_reloading_step=cache_reloading_step
         )
 
         if dataset:

@@ -82,13 +82,19 @@ def estimate_loss(model, diffusion, data_dir, block_size, batch_size, eval_iters
 
 
 @torch.no_grad()
-def generate_samples(model, diffusion, dataset, device, num_samples=3, seq_len=100, steps=32, method="mdm", top_p=1.0):
+def generate_samples(
+    model, diffusion, dataset, device, num_samples=3, seq_len=100, steps=32,
+    method="mdm", top_p=1.0, use_dkv=False, cache_reloading_step=1
+):
     """Generate sample text for wandb logging."""
     model.eval()
     samples = []
     for _ in range(num_samples):
         if method == "mdm":
-            output = diffusion.sample(model, 1, seq_len, steps=steps, device=device)
+            output = diffusion.sample(
+                model, 1, seq_len, steps=steps, device=device,
+                use_dkv_cache=use_dkv, cache_reloading_step=cache_reloading_step
+            )
         else:  # duo
             output = diffusion.sample(model, 1, seq_len, steps=steps, device=device, top_p=top_p)
         ids = [t for t in output[0].tolist() if t < diffusion.vocab_size]
@@ -245,7 +251,12 @@ def main(cfg: DictConfig):
                 # Generate and log samples
                 if iter_num % (cfg.training.eval_interval * 4) == 0:
                     top_p = cfg.diffusion.duo.top_p if method == "duo" else 1.0
-                    samples = generate_samples(model, diffusion, dataset, device, method=method, top_p=top_p)
+                    use_dkv = cfg.diffusion.get("use_dkv", False) if method == "mdm" else False
+                    cache_step = cfg.diffusion.get("cache_reloading_step", 1)
+                    samples = generate_samples(
+                        model, diffusion, dataset, device, method=method, top_p=top_p,
+                        use_dkv=use_dkv, cache_reloading_step=cache_step
+                    )
                     log_dict["samples"] = wandb.Table(
                         columns=["step", "sample"],
                         data=[[iter_num, s] for s in samples]
@@ -333,7 +344,12 @@ def main(cfg: DictConfig):
     if wandb:
         # Log final samples
         top_p = cfg.diffusion.duo.top_p if method == "duo" else 1.0
-        samples = generate_samples(model, diffusion, dataset, device, num_samples=5, seq_len=200, method=method, top_p=top_p)
+        use_dkv = cfg.diffusion.get("use_dkv", False) if method == "mdm" else False
+        cache_step = cfg.diffusion.get("cache_reloading_step", 1)
+        samples = generate_samples(
+            model, diffusion, dataset, device, num_samples=5, seq_len=200,
+            method=method, top_p=top_p, use_dkv=use_dkv, cache_reloading_step=cache_step
+        )
         wandb.log({
             "final_samples": wandb.Table(
                 columns=["sample"],

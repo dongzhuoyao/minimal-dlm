@@ -25,6 +25,11 @@ diffusion:
   dynamic: mdm
   eps: 1e-3
 
+  # dKV-Cache settings (only used when dynamic: mdm)
+  # Reference: https://github.com/horseee/dKV-Cache (NeurIPS'25)
+  use_dkv: false  # Enable dKV-Cache for faster inference
+  cache_reloading_step: 1  # Reload cache every N steps (1=no caching, higher=faster but less accurate)
+
   # DUO-specific settings (only used when dynamic: duo)
   duo:
     gamma_min: -10.0

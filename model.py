@@ -1,13 +1,18 @@
 """
 Masked Diffusion Transformer - Bidirectional transformer for masked diffusion LM.
+
+Supports dKV-Cache for accelerated inference (NeurIPS'25).
+Reference: https://github.com/horseee/dKV-Cache
 """
 import math
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from dkv_cache import DKVCache
 
 
 @dataclass
@@ -77,13 +82,30 @@ class Attention(nn.Module):
         self.proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         self.dropout = nn.Dropout(config.dropout)
 
-    def forward(self, x, cos, sin):
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        layer_idx: int = 0,
+        cache: Optional[DKVCache] = None,
+        cache_position: Optional[torch.Tensor] = None,
+        prv_cache_position: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+    ) -> torch.Tensor:
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         q = q.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+
+        # Apply rotary embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        # Update dKV cache if enabled
+        if cache is not None and cache_position is not None:
+            k, v = cache.update(k, v, layer_idx, cache_position, prv_cache_position)
+
         y = F.scaled_dot_product_attention(q, k, v, is_causal=False)  # Bidirectional!
         return self.dropout(self.proj(y.transpose(1, 2).contiguous().view(B, T, C)))
 
@@ -101,15 +123,32 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_idx: int = 0):
         super().__init__()
+        self.layer_idx = layer_idx
         self.norm1 = RMSNorm(config.n_embd)
         self.attn = Attention(config)
         self.norm2 = RMSNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos, sin):
-        x = x + self.attn(self.norm1(x), cos, sin)
+    def forward(
+        self,
+        x: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cache: Optional[DKVCache] = None,
+        cache_position: Optional[torch.Tensor] = None,
+        prv_cache_position: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+    ) -> torch.Tensor:
+        x = x + self.attn(
+            self.norm1(x), cos, sin,
+            layer_idx=self.layer_idx,
+            cache=cache,
+            cache_position=cache_position,
+            prv_cache_position=prv_cache_position,
+            use_cache=use_cache,
+        )
         return x + self.mlp(self.norm2(x))
 
 
@@ -120,9 +159,14 @@ class MaskedDiffusionTransformer(nn.Module):
         self.tok_emb = nn.Embedding(config.vocab_size + 1, config.n_embd)  # +1 for mask
         self.drop = nn.Dropout(config.dropout)
         self.rotary = RotaryEmbedding(config.head_dim, config.block_size)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)])
         self.norm = RMSNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, config.vocab_size, bias=config.bias)
+
+        # dKV-Cache support
+        self._dkv_cache: Optional[DKVCache] = None
+        self._use_dkv_cache: bool = False
+
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
             if pn.endswith('proj.weight') or pn.endswith('w3.weight'):
@@ -137,12 +181,62 @@ class MaskedDiffusionTransformer(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, x, targets=None, mask_indices=None, p_mask=None):
+    def init_dkv_cache(self, device: torch.device) -> None:
+        """Initialize dKV-Cache for inference."""
+        self._dkv_cache = DKVCache(self.config.n_layer, device)
+        self._use_dkv_cache = True
+
+    def reset_dkv_cache(self) -> None:
+        """Reset dKV-Cache between generations."""
+        if self._dkv_cache is not None:
+            self._dkv_cache.reset()
+
+    def disable_dkv_cache(self) -> None:
+        """Disable dKV-Cache."""
+        self._dkv_cache = None
+        self._use_dkv_cache = False
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        targets: Optional[torch.Tensor] = None,
+        mask_indices: Optional[torch.Tensor] = None,
+        p_mask: Optional[torch.Tensor] = None,
+        cache_position: Optional[torch.Tensor] = None,
+        prv_cache_position: Optional[torch.Tensor] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass with optional dKV-Cache support.
+
+        Args:
+            x: Input token ids (B, T)
+            targets: Target token ids for loss computation
+            mask_indices: Which positions are masked (B, T) bool
+            p_mask: Masking probability for importance weighting
+            cache_position: Current decoded positions (B, T) bool, True = decoded
+            prv_cache_position: Previous decoded positions for cache update
+            use_cache: Whether to use dKV-Cache
+
+        Returns:
+            logits: Output logits (B, T, vocab_size)
+            loss: Cross-entropy loss if targets provided
+        """
         B, T = x.shape
         h = self.drop(self.tok_emb(x))
         cos, sin = self.rotary(h, T)
+
+        # Determine cache usage
+        cache = self._dkv_cache if use_cache and self._use_dkv_cache else None
+
         for block in self.blocks:
-            h = block(h, cos, sin)
+            h = block(
+                h, cos, sin,
+                cache=cache,
+                cache_position=cache_position,
+                prv_cache_position=prv_cache_position,
+                use_cache=use_cache,
+            )
         logits = self.head(self.norm(h))
 
         loss = None
