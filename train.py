@@ -257,10 +257,17 @@ def main(cfg: DictConfig):
                         model, diffusion, dataset, device, method=method, top_p=top_p,
                         use_dkv=use_dkv, cache_reloading_step=cache_step
                     )
+                    # Log as table for structured view
                     log_dict["samples"] = wandb.Table(
                         columns=["step", "sample"],
                         data=[[iter_num, s] for s in samples]
                     )
+                    # Log as HTML for better text visualization
+                    html_content = f"<h3>Step {iter_num}</h3>"
+                    for i, s in enumerate(samples):
+                        escaped = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        html_content += f"<div style='margin:10px 0;padding:10px;background:#f5f5f5;border-radius:5px;font-family:monospace;white-space:pre-wrap;'>{escaped}</div>"
+                    log_dict["samples_text"] = wandb.Html(html_content)
 
                 wandb.log(log_dict)
 
@@ -350,12 +357,20 @@ def main(cfg: DictConfig):
             model, diffusion, dataset, device, num_samples=5, seq_len=200,
             method=method, top_p=top_p, use_dkv=use_dkv, cache_reloading_step=cache_step
         )
-        wandb.log({
+        # Log as table
+        final_log = {
             "final_samples": wandb.Table(
                 columns=["sample"],
                 data=[[s] for s in samples]
             )
-        })
+        }
+        # Log as HTML for better visualization
+        html_content = "<h2>Final Generated Samples</h2>"
+        for i, s in enumerate(samples):
+            escaped = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            html_content += f"<div style='margin:10px 0;padding:10px;background:#f5f5f5;border-radius:5px;font-family:monospace;white-space:pre-wrap;'><b>Sample {i+1}:</b><br>{escaped}</div>"
+        final_log["final_samples_text"] = wandb.Html(html_content)
+        wandb.log(final_log)
         wandb.finish()
 
 
