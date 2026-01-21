@@ -1,5 +1,8 @@
 # Default configuration for Minimal Masked Diffusion Model
 
+# Run tag (used as wandb run name if set)
+tag: null
+
 # Hydra settings
 hydra:
   job:
