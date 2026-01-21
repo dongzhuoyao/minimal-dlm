@@ -32,6 +32,89 @@ python sample.py checkpoint=out/ckpt.pt prompt="ROMEO:"
 python eval.py checkpoint=out/ckpt.pt
 ```
 
+## Dataset
+
+### Shakespeare Character-Level
+
+The default dataset is **Tiny Shakespeare** (~1MB, 1.1M characters), automatically downloaded on first run.
+
+| Split | Characters | Tokens |
+|-------|-----------|--------|
+| Train | ~1M | ~1M |
+| Val | ~100K | ~100K |
+| Vocab | 65 unique characters | - |
+
+**Data format** (nanoGPT-style):
+- `train.bin`, `val.bin`: Binary files of `uint16` token IDs
+- `meta.pkl`: Vocabulary metadata (`stoi`, `itos`, `vocab_size`)
+
+**Preparation** (automatic or manual):
+```bash
+# Auto-downloads and prepares data on first train.py run
+# Or manually:
+python -c "from data import prepare_shakespeare_char; prepare_shakespeare_char('data/shakespeare_char')"
+```
+
+### Adding Custom Datasets
+
+To use your own data, create `train.bin` and `val.bin` with `uint16` token IDs:
+
+```python
+import numpy as np
+import pickle
+
+# Your tokenized data
+train_ids = [...]  # list of token IDs
+val_ids = [...]
+
+# Save binary files
+np.array(train_ids, dtype=np.uint16).tofile('data/mydata/train.bin')
+np.array(val_ids, dtype=np.uint16).tofile('data/mydata/val.bin')
+
+# Save metadata
+meta = {'vocab_size': YOUR_VOCAB_SIZE, 'stoi': {...}, 'itos': {...}}
+with open('data/mydata/meta.pkl', 'wb') as f:
+    pickle.dump(meta, f)
+```
+
+Then train with: `python train.py data.dir=data/mydata`
+
+## Evaluation
+
+### Metrics
+
+| Metric | Description | Formula |
+|--------|-------------|---------|
+| **Loss** | Weighted cross-entropy on masked tokens | `CE / p_mask` |
+| **Perplexity (PPL)** | Exponentiated loss (branching factor) | `exp(loss)` |
+| **Bits per Character (BPC)** | Information-theoretic measure | `loss / ln(2)` |
+
+### Monte Carlo Estimation
+
+Since MDMs use random masking, evaluation uses **Monte Carlo sampling**:
+- Average loss over `mc_samples` different random maskings per batch
+- Default: 16 MC samples × 20 eval batches = 320 forward passes
+
+```bash
+# Standard evaluation
+python eval.py checkpoint=out/ckpt.pt
+
+# More accurate (more MC samples)
+python eval.py checkpoint=out/ckpt.pt mc_samples=64 eval_iters=50
+
+# Evaluate on train split
+python eval.py checkpoint=out/ckpt.pt split=train
+```
+
+### Expected Results (Shakespeare char-level)
+
+| Model | Params | Val Loss | Val PPL | Val BPC |
+|-------|--------|----------|---------|---------|
+| 4L-4H-256D | ~2.5M | ~1.5 | ~4.5 | ~2.2 |
+| 6L-6H-384D | ~10M | ~1.3 | ~3.7 | ~1.9 |
+
+*Results vary with training iterations and hyperparameters.*
+
 ## Configuration (Hydra)
 
 All scripts use [Hydra](https://hydra.cc/) for configuration management.
