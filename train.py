@@ -17,6 +17,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 import torch
+from tqdm import tqdm
 
 from model import MaskedDiffusionTransformer, ModelConfig
 from diffusion import MaskedDiffusion
@@ -66,8 +67,8 @@ def init_wandb(cfg: DictConfig, model, output_dir: Path):
     """Initialize wandb with organized config."""
     import wandb
 
-    # Generate run name if not provided
-    run_name = cfg.wandb.name
+    # Generate run name: tag > wandb.name > output_dir.name
+    run_name = cfg.get("tag", None) or cfg.wandb.name
     if run_name is None:
         run_name = output_dir.name
 
@@ -177,6 +178,9 @@ def main(cfg: DictConfig):
 
     t0 = time.time()
     running_loss = 0.0
+    current_loss = 0.0
+
+    pbar = tqdm(total=cfg.training.max_iters, desc="Training", initial=iter_num)
 
     while iter_num < cfg.training.max_iters:
         lr = get_lr(iter_num, cfg.training.warmup_iters, cfg.training.max_iters,
@@ -188,7 +192,7 @@ def main(cfg: DictConfig):
         if iter_num % cfg.training.eval_interval == 0:
             losses = estimate_loss(model, diffusion, data_dir, cfg.model.block_size,
                                    cfg.training.batch_size, cfg.training.eval_iters, device, ctx)
-            print(f"step {iter_num}: train {losses['train']:.4f}, val {losses['val']:.4f}")
+            tqdm.write(f"step {iter_num}: train {losses['train']:.4f}, val {losses['val']:.4f}")
 
             # Log to wandb
             if wandb:
@@ -225,7 +229,7 @@ def main(cfg: DictConfig):
                 }
                 ckpt_path = checkpoint_dir / "ckpt.pt"
                 torch.save(ckpt, ckpt_path)
-                print(f"  Saved best checkpoint (val_loss={best_val_loss:.4f})")
+                tqdm.write(f"  Saved best checkpoint (val_loss={best_val_loss:.4f})")
 
         # Train step
         x, _ = get_batch("train", data_dir, cfg.training.batch_size, cfg.model.block_size, device)
@@ -247,6 +251,7 @@ def main(cfg: DictConfig):
         optimizer.zero_grad(set_to_none=True)
 
         running_loss += loss.item()
+        current_loss = loss.item()
 
         # Logging
         if iter_num % cfg.training.log_interval == 0:
@@ -258,8 +263,6 @@ def main(cfg: DictConfig):
             # Calculate throughput
             iter_per_sec = cfg.training.log_interval / dt if dt > 0 else 0
             tokens_per_sec = iter_per_sec * cfg.training.batch_size * cfg.model.block_size
-
-            print(f"iter {iter_num}: loss {loss.item():.4f}, {iter_per_sec:.1f} it/s, lr {lr:.2e}")
 
             if wandb:
                 wandb.log({
@@ -276,8 +279,12 @@ def main(cfg: DictConfig):
                     "optim/grad_norm": grad_norm if isinstance(grad_norm, float) else grad_norm.item(),
                 })
 
+        # Update progress bar
+        pbar.set_postfix({"loss": f"{current_loss:.4f}", "lr": f"{lr:.2e}"})
+        pbar.update(1)
         iter_num += 1
 
+    pbar.close()
     print("Training complete!")
 
     if wandb:
