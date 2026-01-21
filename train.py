@@ -21,7 +21,30 @@ from tqdm import tqdm
 
 from model import MaskedDiffusionTransformer, ModelConfig
 from diffusion import MaskedDiffusion
+from duo import DUO
 from data import get_batch, load_meta, prepare_shakespeare_char
+
+
+def create_diffusion(cfg, vocab_size):
+    """Create diffusion process based on config."""
+    method = cfg.diffusion.get("dynamic", "mdm")
+
+    if method == "mdm":
+        return MaskedDiffusion(vocab_size, eps=cfg.diffusion.eps)
+    elif method == "duo":
+        duo_cfg = cfg.diffusion.duo
+        return DUO(
+            vocab_size=vocab_size,
+            eps=cfg.diffusion.eps,
+            gamma_min=duo_cfg.gamma_min,
+            gamma_max=duo_cfg.gamma_max,
+            curriculum_start=duo_cfg.curriculum_start,
+            curriculum_end=duo_cfg.curriculum_end,
+            gumbel_tau_log10_start=duo_cfg.gumbel_tau_log10_start,
+            gumbel_tau_log10_end=duo_cfg.gumbel_tau_log10_end,
+        )
+    else:
+        raise ValueError(f"Unknown diffusion method: {method}. Use 'mdm' or 'duo'.")
 
 
 def get_lr(it, warmup_iters, lr_decay_iters, learning_rate, min_lr):
@@ -34,16 +57,24 @@ def get_lr(it, warmup_iters, lr_decay_iters, learning_rate, min_lr):
 
 
 @torch.no_grad()
-def estimate_loss(model, diffusion, data_dir, block_size, batch_size, eval_iters, device, ctx):
+def estimate_loss(model, diffusion, data_dir, block_size, batch_size, eval_iters, device, ctx, method="mdm"):
     model.eval()
     losses = {}
     for split in ["train", "val"]:
         total = 0.0
         for _ in range(eval_iters):
             x, _ = get_batch(split, data_dir, batch_size, block_size, device)
-            x_t, mask_indices, p_mask = diffusion.forward_process(x)
-            with ctx:
-                _, loss = model(x_t, x, mask_indices, p_mask)
+
+            if method == "mdm":
+                x_t, mask_indices, p_mask = diffusion.forward_process(x)
+                with ctx:
+                    _, loss = model(x_t, x, mask_indices, p_mask)
+            else:  # duo
+                x_t, alpha_t, dalpha_t, _ = diffusion.forward_process(x, global_step=float("inf"))
+                with ctx:
+                    logits, _ = model(x_t)
+                    loss = diffusion.compute_loss(logits, x_t, x, alpha_t, dalpha_t)
+
             total += loss.item()
         losses[split] = total / eval_iters
     model.train()
@@ -51,12 +82,15 @@ def estimate_loss(model, diffusion, data_dir, block_size, batch_size, eval_iters
 
 
 @torch.no_grad()
-def generate_samples(model, diffusion, dataset, device, num_samples=3, seq_len=100, steps=32):
+def generate_samples(model, diffusion, dataset, device, num_samples=3, seq_len=100, steps=32, method="mdm", top_p=1.0):
     """Generate sample text for wandb logging."""
     model.eval()
     samples = []
     for _ in range(num_samples):
-        output = diffusion.sample(model, 1, seq_len, steps=steps, device=device)
+        if method == "mdm":
+            output = diffusion.sample(model, 1, seq_len, steps=steps, device=device)
+        else:  # duo
+            output = diffusion.sample(model, 1, seq_len, steps=steps, device=device, top_p=top_p)
         ids = [t for t in output[0].tolist() if t < diffusion.vocab_size]
         samples.append(dataset.decode(ids))
     model.train()
@@ -142,7 +176,9 @@ def main(cfg: DictConfig):
         bias=cfg.model.bias,
     )
     model = MaskedDiffusionTransformer(model_cfg).to(device)
-    diffusion = MaskedDiffusion(vocab_size, eps=cfg.diffusion.eps)
+    diffusion = create_diffusion(cfg, vocab_size)
+    method = cfg.diffusion.get("dynamic", "mdm")
+    print(f"Using diffusion method: {method}")
 
     # Compile model if requested
     if cfg.system.compile and hasattr(torch, "compile"):
@@ -191,7 +227,7 @@ def main(cfg: DictConfig):
         # Evaluate
         if iter_num % cfg.training.eval_interval == 0:
             losses = estimate_loss(model, diffusion, data_dir, cfg.model.block_size,
-                                   cfg.training.batch_size, cfg.training.eval_iters, device, ctx)
+                                   cfg.training.batch_size, cfg.training.eval_iters, device, ctx, method)
             tqdm.write(f"step {iter_num}: train {losses['train']:.4f}, val {losses['val']:.4f}")
 
             # Log to wandb
@@ -208,7 +244,8 @@ def main(cfg: DictConfig):
 
                 # Generate and log samples
                 if iter_num % (cfg.training.eval_interval * 4) == 0:
-                    samples = generate_samples(model, diffusion, dataset, device)
+                    top_p = cfg.diffusion.duo.top_p if method == "duo" else 1.0
+                    samples = generate_samples(model, diffusion, dataset, device, method=method, top_p=top_p)
                     log_dict["samples"] = wandb.Table(
                         columns=["step", "sample"],
                         data=[[iter_num, s] for s in samples]
@@ -233,10 +270,16 @@ def main(cfg: DictConfig):
 
         # Train step
         x, _ = get_batch("train", data_dir, cfg.training.batch_size, cfg.model.block_size, device)
-        x_t, mask_indices, p_mask = diffusion.forward_process(x)
 
-        with ctx:
-            _, loss = model(x_t, x, mask_indices, p_mask)
+        if method == "mdm":
+            x_t, mask_indices, p_mask = diffusion.forward_process(x)
+            with ctx:
+                _, loss = model(x_t, x, mask_indices, p_mask)
+        else:  # duo
+            x_t, alpha_t, dalpha_t, is_curriculum = diffusion.forward_process(x, global_step=iter_num)
+            with ctx:
+                logits, _ = model(x_t)
+                loss = diffusion.compute_loss(logits, x_t, x, alpha_t, dalpha_t)
 
         scaler.scale(loss).backward()
 
@@ -289,7 +332,8 @@ def main(cfg: DictConfig):
 
     if wandb:
         # Log final samples
-        samples = generate_samples(model, diffusion, dataset, device, num_samples=5, seq_len=200)
+        top_p = cfg.diffusion.duo.top_p if method == "duo" else 1.0
+        samples = generate_samples(model, diffusion, dataset, device, num_samples=5, seq_len=200, method=method, top_p=top_p)
         wandb.log({
             "final_samples": wandb.Table(
                 columns=["sample"],

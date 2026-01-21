@@ -21,7 +21,19 @@ model:
 
 # Diffusion process
 diffusion:
+  # Method: 'mdm' (Masked Diffusion Model) or 'duo' (Discrete Uniform Diffusion)
+  dynamic: mdm
   eps: 1e-3
+
+  # DUO-specific settings (only used when dynamic: duo)
+  duo:
+    gamma_min: -10.0
+    gamma_max: 10.0
+    curriculum_start: 0
+    curriculum_end: 5000
+    gumbel_tau_log10_start: 0.0
+    gumbel_tau_log10_end: -10.0
+    top_p: 1.0  # Nucleus sampling (1.0 = disabled)
 
 # Training
 training:
