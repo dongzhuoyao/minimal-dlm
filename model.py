@@ -147,13 +147,19 @@ class MaskedDiffusionTransformer(nn.Module):
 
         loss = None
         if targets is not None and mask_indices is not None:
+            # Use reshape instead of view for non-contiguous tensors
+            logits_flat = logits.reshape(-1, self.config.vocab_size)
+            targets_flat = targets.reshape(-1)
+            mask_flat = mask_indices.reshape(-1)
+
             loss_unreduced = F.cross_entropy(
-                logits.view(-1, self.config.vocab_size)[mask_indices.view(-1)],
-                targets.view(-1)[mask_indices.view(-1)],
+                logits_flat[mask_flat],
+                targets_flat[mask_flat],
                 reduction='none'
             )
             if p_mask is not None:
-                loss_unreduced = loss_unreduced / p_mask.view(-1)[mask_indices.view(-1)]
+                p_mask_flat = p_mask.reshape(-1)
+                loss_unreduced = loss_unreduced / p_mask_flat[mask_flat]
             loss = loss_unreduced.sum() / (B * T)
         return logits, loss
 

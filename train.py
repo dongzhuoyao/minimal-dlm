@@ -4,16 +4,17 @@ Training script for Minimal Masked Diffusion Language Model.
 Usage:
     python train.py                                    # Default config
     python train.py training.max_iters=10000           # Override iterations
-    python train.py experiment=medium                  # Use medium model config
-    python train.py logging.wandb=true                 # Enable wandb
+    python train.py +experiment=medium                 # Use medium model config
+    python train.py wandb.enabled=true                 # Enable wandb
 """
 import os
 import math
 import time
 from contextlib import nullcontext
-from datetime import datetime
+from pathlib import Path
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 import torch
 
@@ -61,25 +62,24 @@ def generate_samples(model, diffusion, dataset, device, num_samples=3, seq_len=1
     return samples
 
 
-def init_wandb(cfg: DictConfig, model):
+def init_wandb(cfg: DictConfig, model, output_dir: Path):
     """Initialize wandb with organized config."""
     import wandb
 
     # Generate run name if not provided
-    run_name = cfg.logging.name
+    run_name = cfg.wandb.name
     if run_name is None:
-        timestamp = datetime.now().strftime("%m%d_%H%M")
-        run_name = f"mdm_{cfg.model.n_layer}L{cfg.model.n_head}H{cfg.model.n_embd}D_{timestamp}"
+        run_name = output_dir.name
 
     # Flatten config for wandb
     config_dict = OmegaConf.to_container(cfg, resolve=True)
 
     wandb.init(
-        project=cfg.logging.project,
-        entity=cfg.logging.entity,
+        project=cfg.wandb.project,
+        entity=cfg.wandb.entity,
         name=run_name,
-        tags=list(cfg.logging.tags) if cfg.logging.tags else [],
         config=config_dict,
+        dir=str(output_dir),
         reinit=True,
     )
 
@@ -113,10 +113,14 @@ def main(cfg: DictConfig):
     dtype = dtype_map[cfg.system.dtype]
     ctx = torch.amp.autocast(device_type=device_type, dtype=dtype) if device_type == "cuda" else nullcontext()
 
-    # Get original working directory (hydra changes cwd)
+    # Get directories
     orig_cwd = hydra.utils.get_original_cwd()
     data_dir = os.path.join(orig_cwd, cfg.data.dir)
-    out_dir = os.path.join(orig_cwd, cfg.checkpoint.dir)
+
+    # Use Hydra output directory for checkpoints
+    output_dir = Path(HydraConfig.get().runtime.output_dir)
+    checkpoint_dir = output_dir / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare data
     if not os.path.exists(os.path.join(data_dir, "train.bin")):
@@ -144,8 +148,8 @@ def main(cfg: DictConfig):
 
     # Initialize wandb
     wandb = None
-    if cfg.logging.wandb:
-        wandb = init_wandb(cfg, model)
+    if cfg.wandb.enabled:
+        wandb = init_wandb(cfg, model, output_dir)
 
         # Watch model gradients
         wandb.watch(model, log="gradients", log_freq=100)
@@ -161,14 +165,13 @@ def main(cfg: DictConfig):
 
     # Training state
     iter_num, best_val_loss = 0, float("inf")
-    os.makedirs(out_dir, exist_ok=True)
 
     # Load dataset for sample generation
     from data import TextDataset
     dataset = TextDataset(data_dir)
 
     print(f"Training for {cfg.training.max_iters} iterations")
-    print(f"Output: {out_dir}")
+    print(f"Output: {output_dir}")
 
     t0 = time.time()
     running_loss = 0.0
@@ -216,11 +219,9 @@ def main(cfg: DictConfig):
                     "config": model_cfg.__dict__,
                     "hydra_cfg": OmegaConf.to_container(cfg),
                 }
-                torch.save(ckpt, os.path.join(out_dir, "ckpt.pt"))
+                ckpt_path = checkpoint_dir / "ckpt.pt"
+                torch.save(ckpt, ckpt_path)
                 print(f"  Saved best checkpoint (val_loss={best_val_loss:.4f})")
-
-                if wandb and cfg.logging.log_model:
-                    wandb.save(os.path.join(out_dir, "ckpt.pt"))
 
         # Train step
         x, _ = get_batch("train", data_dir, cfg.training.batch_size, cfg.model.block_size, device)

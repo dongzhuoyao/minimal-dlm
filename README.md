@@ -25,11 +25,11 @@ pip install torch numpy hydra-core omegaconf wandb
 # Train (auto-downloads Shakespeare)
 python train.py
 
-# Generate text
-python sample.py checkpoint=out/ckpt.pt prompt="ROMEO:"
+# Generate text (checkpoint saved in outputs/{date}/{time}/checkpoints/)
+python sample.py checkpoint=outputs/2024-01-01/12-00-00/checkpoints/ckpt.pt prompt="ROMEO:"
 
 # Evaluate
-python eval.py checkpoint=out/ckpt.pt
+python eval.py checkpoint=outputs/2024-01-01/12-00-00/checkpoints/ckpt.pt
 ```
 
 ## Dataset
@@ -127,11 +127,11 @@ python train.py training.max_iters=10000 model.n_layer=6
 python train.py +experiment=medium
 
 # Enable wandb logging
-python train.py logging.wandb=true logging.project=my-project
+python train.py wandb.enabled=true wandb.project=my-project
 
 # Multiple overrides
 python train.py model.n_layer=6 model.n_head=6 model.n_embd=384 \
-                training.learning_rate=6e-4 logging.wandb=true
+                training.learning_rate=6e-4 wandb.enabled=true
 ```
 
 ## Weights & Biases Integration
@@ -145,11 +145,10 @@ Organized wandb logging with:
 
 ```bash
 # Enable wandb
-python train.py logging.wandb=true
+python train.py wandb.enabled=true
 
 # Custom project/run name
-python train.py logging.wandb=true logging.project=mdm-experiments \
-                logging.name=my-run logging.tags=[small,debug]
+python train.py wandb.enabled=true wandb.project=mdm-experiments wandb.name=my-run
 ```
 
 ## Core Concepts
@@ -188,7 +187,7 @@ Importance weighting by `1/p_mask` ensures proper likelihood estimation.
 python train.py
 
 # Medium model with wandb
-python train.py +experiment=medium logging.wandb=true
+python train.py +experiment=medium wandb.enabled=true
 
 # Custom model
 python train.py model.n_layer=8 model.n_head=8 model.n_embd=512 \
@@ -201,21 +200,21 @@ python train.py system.device=cpu system.dtype=float32
 ## Sampling Examples
 
 ```bash
-# Basic sampling
-python sample.py checkpoint=out/ckpt.pt
+# Basic sampling (use checkpoint path from training output)
+python sample.py checkpoint=outputs/2024-01-01/12-00-00/checkpoints/ckpt.pt
 
 # With prompt
-python sample.py checkpoint=out/ckpt.pt prompt="To be or not"
+python sample.py checkpoint=outputs/.../checkpoints/ckpt.pt prompt="To be or not"
 
 # Adjust quality/diversity
-python sample.py checkpoint=out/ckpt.pt \
+python sample.py checkpoint=outputs/.../checkpoints/ckpt.pt \
                 sampling.steps=128 sampling.temperature=0.8
 
 # Confidence-based sampling
-python sample.py checkpoint=out/ckpt.pt sampling.strategy=confidence
+python sample.py checkpoint=outputs/.../checkpoints/ckpt.pt sampling.strategy=confidence
 
 # Multiple samples
-python sample.py checkpoint=out/ckpt.pt num_samples=5
+python sample.py checkpoint=outputs/.../checkpoints/ckpt.pt num_samples=5
 ```
 
 ## References

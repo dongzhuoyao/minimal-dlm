@@ -1,5 +1,12 @@
 # Default configuration for Minimal Masked Diffusion Model
 
+# Hydra settings
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+
 # Model architecture
 model:
   n_layer: 4
@@ -15,16 +22,17 @@ diffusion:
 
 # Training
 training:
-  batch_size: 64
-  max_iters: 5000
+  batch_size: 256
+  max_iters: 10000
   learning_rate: 1e-3
   weight_decay: 0.1
-  warmup_iters: 100
+  warmup_iters: 500
   min_lr: 1e-4
   grad_clip: 1.0
   eval_interval: 250
   eval_iters: 20
-  log_interval: 10
+  log_interval: 100
+  save_interval: 1000
 
 # Sampling
 sampling:
@@ -37,19 +45,12 @@ data:
   dir: data/shakespeare_char
   dataset: shakespeare_char
 
-# Logging
-logging:
-  wandb: true
+# Wandb
+wandb:
+  enabled: true
   project: minimal-dlm
   entity: null
-  name: null  # auto-generated if null
-  tags: []
-  log_model: false  # log model checkpoints to wandb
-
-# Checkpoints
-checkpoint:
-  dir: out
-  save_interval: 1000
+  name: null  # auto-generated from output dir if null
 
 # System
 system:
