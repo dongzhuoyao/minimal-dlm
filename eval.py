@@ -4,10 +4,14 @@ Evaluation script for Minimal Masked Diffusion Language Model.
 Usage:
     python eval.py checkpoint=out/ckpt.pt
     python eval.py checkpoint=out/ckpt.pt eval_iters=100 mc_samples=32
+    python eval.py checkpoint=out/ckpt.pt wandb.enabled=true
 """
 import os
+from pathlib import Path
+
 import hydra
-from omegaconf import DictConfig
+from hydra.core.hydra_config import HydraConfig
+from omegaconf import DictConfig, OmegaConf
 import numpy as np
 import torch
 
@@ -92,6 +96,55 @@ def main(cfg: DictConfig):
     for k, v in results.items():
         print(f"{k:20s}: {v:.4f}")
     print("=" * 50)
+
+    # Log to wandb if enabled
+    if cfg.wandb.enabled:
+        import wandb
+
+        output_dir = Path(HydraConfig.get().runtime.output_dir)
+        run_name = f"eval_{output_dir.name}"
+
+        wandb.init(
+            project=cfg.wandb.project,
+            entity=cfg.wandb.entity,
+            name=run_name,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            dir=str(output_dir),
+            job_type="eval",
+        )
+
+        # Log model info
+        wandb.config.update({
+            "model/architecture": f"{model_cfg.n_layer}L-{model_cfg.n_head}H-{model_cfg.n_embd}D",
+            "model/num_params_M": sum(p.numel() for p in model.parameters()) / 1e6,
+            "eval/checkpoint": checkpoint,
+            "eval/checkpoint_iter": ckpt.get("iter_num", -1),
+            "eval/eval_iters": eval_iters,
+            "eval/mc_samples": mc_samples,
+        })
+
+        # Log results
+        wandb.log({
+            "eval/train_loss": results["train_loss"],
+            "eval/val_loss": results["val_loss"],
+            "eval/train_loss_std": results["train_loss_std"],
+            "eval/val_loss_std": results["val_loss_std"],
+            "eval/train_ppl": results["train_perplexity"],
+            "eval/val_ppl": results["val_perplexity"],
+            "eval/train_bpc": results["train_bpc"],
+            "eval/val_bpc": results["val_bpc"],
+        })
+
+        # Log summary table
+        wandb.log({
+            "results": wandb.Table(
+                columns=["metric", "value"],
+                data=[[k, v] for k, v in results.items()]
+            )
+        })
+
+        wandb.finish()
+        print(f"\nResults logged to wandb project: {cfg.wandb.project}")
 
 
 if __name__ == "__main__":
